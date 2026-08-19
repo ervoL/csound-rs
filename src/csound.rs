@@ -181,17 +181,19 @@ impl Csound {
     ///
     /// # Errors
     ///
-    /// Returns an error if initialization fails. A positive Csound return
-    /// (library already initialized by this process) is success.
+    /// Returns an error if initialization fails. Zero or a positive Csound
+    /// return (library already initialized by this process) is success;
+    /// a negative return is `InitFailed`.
     pub fn initialize(flags: i32) -> Result<()> {
         unsafe {
-            match csound_sys::csoundInitialize(flags as c_int) {
-                CSOUND_STATUS::CSOUND_ERROR => {
-                    tracing::error!(flags, "failed to initialize csound");
-                    Err(Error::InitFailed)
-                }
-                CSOUND_STATUS::CSOUND_SUCCESS => Ok(()),
-                _ => Ok(()), // Already initialized is not an error
+            let status = csound_sys::csoundInitialize(flags as c_int);
+            // 0 = first init in this process; positive = already initialized.
+            // Negative is a real failure (CSOUND_ERROR and friends).
+            if status >= 0 {
+                Ok(())
+            } else {
+                tracing::error!(flags, status, "failed to initialize csound");
+                Err(Error::InitFailed)
             }
         }
     }
@@ -1283,23 +1285,16 @@ impl Csound {
     {
         let mut ptr: *mut c_void = ptr::null_mut();
         let ptr_ref = &mut ptr as *mut *mut c_void;
-        let len;
-        let type_bits;
-
-        match S::c_type() {
-            ControlChannelType::Audio => {
-                len = self.get_ksmps() as usize;
-                type_bits = controlChannelType::CSOUND_AUDIO_CHANNEL as c_int;
-            }
-            ControlChannelType::Control => {
-                len = 1;
-                type_bits = controlChannelType::CSOUND_CONTROL_CHANNEL as c_int;
-            }
+        let (len, type_bits) = match S::c_type() {
+            ControlChannelType::Audio => (
+                self.get_ksmps() as usize,
+                controlChannelType::CSOUND_AUDIO_CHANNEL as c_int,
+            ),
+            ControlChannelType::Control => (1, controlChannelType::CSOUND_CONTROL_CHANNEL as c_int),
             ControlChannelType::String => {
                 // Defer datasize lookup until after csoundGetChannelPtr,
                 // so string channels can be created if missing.
-                len = 0;
-                type_bits = controlChannelType::CSOUND_STRING_CHANNEL as c_int;
+                (0, controlChannelType::CSOUND_STRING_CHANNEL as c_int)
             }
             _ => {
                 tracing::error!(
@@ -1311,7 +1306,7 @@ impl Csound {
                     "unsupported channel type (only Audio, Control, and String channels are supported)",
                 ));
             }
-        }
+        };
 
         let bits = type_bits | D::FLAG;
         let cname = CString::new(name)?;
