@@ -3,7 +3,6 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 use std::slice;
-use std::sync::OnceLock;
 
 use crate::channels::{
     ChannelBehavior, ChannelDir, ChannelHandle, ChannelHints, ChannelInfo, ChannelSpec,
@@ -71,9 +70,6 @@ pub(crate) struct Inner {
     host_data: NonNull<CallbackHandler<'static>>,
 }
 
-/// Global initialization guard - csound is initialized exactly once
-static CSOUND_INIT: OnceLock<i32> = OnceLock::new();
-
 // SAFETY: The CSOUND pointer can be safely sent between threads when:
 // 1. Access is externally synchronized (e.g., via Mutex), OR
 // 2. Only thread-safe Csound APIs are used (channels, message buffer)
@@ -108,18 +104,12 @@ impl Csound {
     /// });
     /// ```
     pub fn new() -> Result<Self> {
-        // Initialize csound library exactly once (thread-safe)
+        // Csound returns 0 on first init, positive if another module in this
+        // process already called csoundInitialize (a second stuffed VST3 copy
+        // of the same host). That is success — see Csound::initialize().
         let flags =
-            (csound_sys::CSOUNDINIT_NO_SIGNAL_HANDLER | csound_sys::CSOUNDINIT_NO_ATEXIT) as c_int;
-        let status = *CSOUND_INIT.get_or_init(|| unsafe { csound_sys::csoundInitialize(flags) });
-        match Status::from(status) {
-            Status::Success => {}
-            Status::Signal => return Err(Error::Signal),
-            Status::Memory => return Err(Error::Memory),
-            Status::Performance => return Err(Error::Performance),
-            Status::Initialization => return Err(Error::Initialization),
-            _ => return Err(Error::InitFailed),
-        }
+            (csound_sys::CSOUNDINIT_NO_SIGNAL_HANDLER | csound_sys::CSOUNDINIT_NO_ATEXIT) as i32;
+        Csound::initialize(flags)?;
 
         // Ensure MYFLT size matches the linked Csound library.
         let expected = std::mem::size_of::<crate::Myflt>();
@@ -191,7 +181,8 @@ impl Csound {
     ///
     /// # Errors
     ///
-    /// Returns an error if initialization fails.
+    /// Returns an error if initialization fails. A positive Csound return
+    /// (library already initialized by this process) is success.
     pub fn initialize(flags: i32) -> Result<()> {
         unsafe {
             match csound_sys::csoundInitialize(flags as c_int) {
